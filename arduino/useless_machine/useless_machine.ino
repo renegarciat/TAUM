@@ -28,13 +28,14 @@ const uint8_t BUZZER_PIN     = 5;
 // ---- Tunables ----
 const float PRESENCE_THRESHOLD_CM  = 50.0;   // distances at or below this count as "someone is here"
 const unsigned long LEAVE_DELAY_MS = 5000;   // delay after leaving before the buzzer fires
-const uint8_t BUZZER_BEEP_COUNT    = 3;      // number of beeps
-const unsigned long BUZZER_BEEP_MS = 200;    // duration of each beep and each silence between beeps
+const unsigned long BUZZ_DURATION_MS = 5000; // how long the buzzer rings once triggered
 
 const unsigned long LOOP_PERIOD_MS       = 100;
 const unsigned long BUTTON_DEBOUNCE_MS   = 30;
 const uint8_t PRESENCE_DEBOUNCE_SAMPLES  = 3;  // consecutive matching reads before believing a presence change
 const unsigned long ECHO_TIMEOUT_US      = 30000; // ~5 m round trip; also covers "nothing in range"
+const uint8_t BUZZER_DUTY                = 10;   // analogWrite duty (0-255) used while the buzzer is "on";
+                                                  // this buzzer only sounds at a low duty, not at e.g. 128
 
 enum MachineState {
   STATE_IDLE,       // nothing stored, waiting for a button press while someone is near
@@ -45,18 +46,16 @@ enum MachineState {
 
 MachineState state = STATE_IDLE;
 unsigned long countdownDeadlineMs = 0;
-unsigned long nextBeepToggleMs = 0;
-uint8_t beepsRemaining = 0;
-bool buzzerOn = false;
+unsigned long buzzStopMs = 0;
 
 void setup() {
   Serial.begin(115200);
 
-  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  pinMode(BUTTON_PIN, INPUT); // self-powered button module drives its own idle level, no internal pull-up
   pinMode(ULTRASONIC_PIN, OUTPUT);
   digitalWrite(ULTRASONIC_PIN, LOW);
   pinMode(BUZZER_PIN, OUTPUT);
-  digitalWrite(BUZZER_PIN, LOW);
+  analogWrite(BUZZER_PIN, 0);
 
   Serial.println("The almost useless machine is ready. Press the button while standing close.");
 }
@@ -103,9 +102,10 @@ bool presenceDebounced(float distanceCm) {
 }
 
 // Edge-triggered, debounced button read. Returns true exactly once per physical press.
+// This is a self-powered 3-pin button module: SIG idles LOW and goes HIGH when pressed.
 bool buttonPressedEdge() {
-  static bool stableState = true; // true = released (pulled up)
-  static bool lastRaw = true;
+  static bool stableState = false; // false = released (idle LOW)
+  static bool lastRaw = false;
   static unsigned long lastChangeMs = 0;
 
   bool raw = digitalRead(BUTTON_PIN);
@@ -117,7 +117,7 @@ bool buttonPressedEdge() {
   }
 
   if (raw != stableState && (now - lastChangeMs) >= BUTTON_DEBOUNCE_MS) {
-    bool wasReleaseToPress = (stableState == true && raw == false);
+    bool wasReleaseToPress = (stableState == false && raw == true);
     stableState = raw;
     return wasReleaseToPress;
   }
@@ -150,23 +150,17 @@ void loop() {
     case STATE_COUNTDOWN:
       if (millis() >= countdownDeadlineMs) {
         Serial.println("Ding dong. Too little, too late.");
-        beepsRemaining = BUZZER_BEEP_COUNT * 2; // on+off per beep
-        nextBeepToggleMs = millis();
+        analogWrite(BUZZER_PIN, BUZZER_DUTY);
+        buzzStopMs = millis() + BUZZ_DURATION_MS;
         state = STATE_BUZZING;
       }
       break;
 
     case STATE_BUZZING:
-      if (millis() >= nextBeepToggleMs) {
-        buzzerOn = !buzzerOn;
-        digitalWrite(BUZZER_PIN, buzzerOn ? HIGH : LOW);
-        nextBeepToggleMs += BUZZER_BEEP_MS;
-        beepsRemaining--;
-        if (beepsRemaining == 0) {
-          digitalWrite(BUZZER_PIN, LOW);
-          Serial.println("Done. Back to waiting for the next victim.");
-          state = STATE_IDLE;
-        }
+      if (millis() >= buzzStopMs) {
+        analogWrite(BUZZER_PIN, 0);
+        Serial.println("Done. Back to waiting for the next victim.");
+        state = STATE_IDLE;
       }
       break;
   }
